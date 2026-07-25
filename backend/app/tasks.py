@@ -1,5 +1,6 @@
+import os
 import time
-from celery import group
+from celery import group, chord
 from app.celery_app import celery_app
 from app.database import db
 from app.models import Job, HostStatus
@@ -16,7 +17,7 @@ def get_flask_app():
 
 
 @celery_app.task(bind=True, name="app.tasks.process_single_host")
-def process_single_host(self, host_status_id, action, credentials, installer_path=None, app_name=None, uninstall_key=None):
+def process_single_host(self, host_status_id, action, credentials, installer_path=None, app_name=None, uninstall_key=None, server_host=None):
     """
     Sub-task running concurrently for each target host.
     Executes PyWinRM operations and updates real-time status in SQLite.
@@ -41,14 +42,39 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
             winrm_client = WinRMService(target_host, username, password)
 
             if action == "INSTALL":
-                host_status.progress_percent = 50
-                host_status.log_output = f"Executing installer: {installer_path}..."
-                db.session.commit()
+                # Check if it's a file we uploaded to the backend container
+                if installer_path and installer_path.startswith("/app/uploads"):
+                    filename = os.path.basename(installer_path)
+                    download_url = f"http://{server_host}/api/uploads/download/{filename}"
+                    remote_dest = f"C:\\Windows\\Temp\\{filename}"
+                    
+                    host_status.progress_percent = 40
+                    host_status.log_output = f"Downloading {filename} to target machine..."
+                    db.session.commit()
 
-                # Remote silent installation command
-                ps_script = f"""
-                Start-Process -FilePath "cmd.exe" -ArgumentList "/c {installer_path}" -Wait -NoNewWindow
-                """
+                    # Set correct silent arguments for MSI vs EXE
+                    if filename.lower().endswith(".msi"):
+                        install_cmd = f"msiexec.exe /i {remote_dest} /qn /norestart"
+                    else:
+                        install_cmd = f"{remote_dest} /S /quiet"
+
+                    ps_script = f"""
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    Invoke-WebRequest -Uri "{download_url}" -OutFile "{remote_dest}" -UseBasicParsing
+                    Start-Process -FilePath "cmd.exe" -ArgumentList '/c "{install_cmd}"' -Wait -NoNewWindow
+                    Remove-Item -Path "{remote_dest}" -Force
+                    """
+                else:
+                    # Fallback for standard UNC network paths
+                    host_status.progress_percent = 50
+                    host_status.log_output = f"Executing UNC path installer: {installer_path}..."
+                    db.session.commit()
+                    
+                    # FIXED: Added single quotes around the /c argument to protect spaces in the UNC path
+                    ps_script = f"""
+                    Start-Process -FilePath "cmd.exe" -ArgumentList '/c "{installer_path}"' -Wait -NoNewWindow
+                    """
+
                 result = winrm_client.run_powershell(ps_script)
 
                 if result["success"]:
@@ -68,15 +94,15 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                 # Step 1: Verify application presence & version on target host
                 discovery = RegistryService.fetch_installed_applications(target_host, username, password)
                 
-                if not discovery["success"]:
+                if not discovery.get("success"):
                     host_status.status = "FAILED"
                     host_status.progress_percent = 100
-                    host_status.log_output = f"Registry Query Failed: {discovery['error']}"
+                    host_status.log_output = f"Registry Query Failed: {discovery.get('error', 'Unknown error')}"
                     db.session.commit()
                     return {"status": "FAILED"}
 
                 # Search matching app by display name
-                matched_app = next((a for a in discovery["apps"] if a["name"] == app_name), None)
+                matched_app = next((a for a in discovery.get("apps", []) if a["name"] == app_name), None)
 
                 if not matched_app:
                     host_status.status = "MISMATCH"
@@ -116,11 +142,32 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
             return {"status": "FAILED", "error": str(e)}
 
 
-@celery_app.task(bind=True, name="app.tasks.execute_bulk_operation")
-def execute_bulk_operation(self, job_id, credentials):
+# ---------------------------------------------------------------------------
+# Callback Task to finalize the job after all hosts are done
+# ---------------------------------------------------------------------------
+@celery_app.task(bind=True, name="app.tasks.finalize_job")
+def finalize_job(self, results, job_id):
     """
-    Master orchestrator: Fetches all target hosts under job_id and launches
-    sub-tasks concurrently using a Celery task group.
+    This runs automatically after ALL process_single_host tasks complete.
+    """
+    app = get_flask_app()
+    with app.app_context():
+        job = Job.query.get(job_id)
+        if job:
+            job.status = "COMPLETED"
+            db.session.commit()
+            
+    return {"status": "COMPLETED", "job_id": job_id}
+
+
+# ---------------------------------------------------------------------------
+# Master Orchestrator
+# ---------------------------------------------------------------------------
+@celery_app.task(bind=True, name="app.tasks.execute_bulk_operation")
+def execute_bulk_operation(self, job_id, credentials, server_host="localhost"):
+    """
+    Master orchestrator: Fetches all target hosts and launches sub-tasks 
+    using a Celery chord to prevent synchronous blocking.
     """
     app = get_flask_app()
     with app.app_context():
@@ -141,20 +188,13 @@ def execute_bulk_operation(self, job_id, credentials):
                 credentials=credentials,
                 installer_path=job.installer_path,
                 app_name=job.app_name,
-                uninstall_key=job.uninstall_key
+                uninstall_key=job.uninstall_key,
+                server_host=server_host
             )
             for h in hosts
         ]
 
-        # Launch parallel subtasks group
-        job_group = group(subtasks)
-        group_result = job_group.apply_async()
+        # Use a chord: Run all subtasks, then call finalize_job
+        chord(subtasks)(finalize_job.s(job_id=job_id))
 
-        # Wait for all parallel workers to wrap up
-        group_result.get()
-
-        # Update Master Job status
-        job.status = "COMPLETED"
-        db.session.commit()
-
-        return {"status": "COMPLETED", "job_id": job_id}
+        return {"status": "LAUNCHED", "job_id": job_id}

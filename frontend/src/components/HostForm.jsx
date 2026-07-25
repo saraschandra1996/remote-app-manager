@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { Play, Search, Shield, HardDrive, Globe, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Play, Search, Shield, HardDrive, Globe, AlertTriangle, UploadCloud } from 'lucide-react';
+import { uploadFile, getUploadedFiles } from '../services/api'; // Ensure correct path
 
 export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
   const [action, setAction] = useState('INSTALL');
@@ -8,6 +9,47 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [installerPath, setInstallerPath] = useState('');
+
+  // New states for File Upload & Selection
+  const [availableFiles, setAvailableFiles] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
+  useEffect(() => {
+    fetchFiles();
+  }, []);
+
+  const fetchFiles = async () => {
+    try {
+      const response = await getUploadedFiles();
+      setAvailableFiles(response.data.files || []);
+    } catch (error) {
+      console.error("Failed to fetch uploaded files:", error);
+    }
+  };
+
+  const handleFileUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setUploading(true);
+    setUploadProgress(0);
+
+    try {
+      const response = await uploadFile(file, (progressEvent) => {
+        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+        setUploadProgress(percentCompleted);
+      });
+      
+      await fetchFiles();
+      // Auto-select the newly uploaded file
+      setInstallerPath(response.data.path);
+    } catch (error) {
+      alert("File upload failed. Ensure it is an .exe or .msi under 2GB.");
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const handleActionSubmit = (e) => {
     e.preventDefault();
@@ -19,7 +61,6 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
     }
 
     if (action === 'UNINSTALL') {
-      // For uninstallation, sample from the first host in the list
       onDiscoverApps({
         sample_host: hostList[0],
         domain,
@@ -97,20 +138,42 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
           ></textarea>
         </div>
 
-        {/* Installer Path for Install Action */}
+        {/* --- UPDATED: Installer Path & Upload Selection --- */}
         {action === 'INSTALL' && (
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">
-              Installer Path / Command (MSI/EXE)
+          <div className="bg-slate-900 border border-slate-700 rounded-lg p-4 space-y-3">
+            <label className="block text-xs font-semibold text-slate-300 uppercase mb-1 flex items-center gap-1">
+              <UploadCloud className="w-4 h-4 text-slate-400" /> Installer File Selection
             </label>
-            <input
-              type="text"
-              placeholder="e.g. \\server\share\installer.msi /quiet"
+            
+            <select
               value={installerPath}
               onChange={(e) => setInstallerPath(e.target.value)}
               required
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 text-sm"
-            />
+              className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 text-sm"
+            >
+              <option value="">-- Select an uploaded installer --</option>
+              {availableFiles.map((file, idx) => (
+                <option key={idx} value={file.path}>
+                  {file.filename}
+                </option>
+              ))}
+            </select>
+
+            <div className="flex items-center gap-4 border-t border-slate-700 pt-3 mt-3">
+              <span className="text-xs font-semibold text-slate-400 uppercase">Or upload new:</span>
+              <input
+                type="file"
+                accept=".exe,.msi"
+                onChange={handleFileUpload}
+                disabled={uploading}
+                className="text-sm text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-indigo-600/20 file:text-indigo-400 hover:file:bg-indigo-600/30 cursor-pointer"
+              />
+              {uploading && (
+                <span className="text-xs font-semibold text-indigo-400 animate-pulse">
+                  Uploading... {uploadProgress}%
+                </span>
+              )}
+            </div>
           </div>
         )}
 

@@ -1,6 +1,7 @@
 import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask import send_from_directory
 from app.config import Config
 from app.database import db, init_db
 from app.models import Job, HostStatus
@@ -98,7 +99,10 @@ def create_job():
     db.session.commit()
 
     credentials = {"username": username, "password": password}
-    execute_bulk_operation.delay(job_id, credentials)
+    server_host = request.host  # Get the server IP automatically
+
+    # Update this line to pass the server_host
+    execute_bulk_operation.delay(job_id, credentials, server_host)
 
     return jsonify({"job_id": job_id, "status": "QUEUED"}), 201
 
@@ -131,6 +135,69 @@ def get_job_status(job_id):
         ]
     })
 
+import os
+from werkzeug.utils import secure_filename
+
+# Add this near your other configuration variables
+UPLOAD_FOLDER = '/app/uploads'
+ALLOWED_EXTENSIONS = {'exe', 'msi'}
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# ---------------------------------------------------------------------------
+# File Upload Endpoint
+# ---------------------------------------------------------------------------
+@app.route("/upload", methods=["POST"])
+@app.route("/api/upload", methods=["POST"])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part in the request"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+        
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        save_path = os.path.join(UPLOAD_FOLDER, filename)
+        
+        try:
+            file.save(save_path)
+            return jsonify({
+                "message": "File uploaded successfully", 
+                "filename": filename,
+                "path": save_path
+            }), 201
+        except Exception as e:
+            return jsonify({"error": f"Failed to save file: {str(e)}"}), 500
+            
+    return jsonify({"error": "Invalid file type. Only .exe and .msi are allowed."}), 400
+
+# ---------------------------------------------------------------------------
+# List Uploaded Files Endpoint (For React Dropdown)
+# ---------------------------------------------------------------------------
+@app.route("/uploads", methods=["GET"])
+@app.route("/api/uploads", methods=["GET"])
+def list_uploads():
+    try:
+        files = []
+        for filename in os.listdir(UPLOAD_FOLDER):
+            if allowed_file(filename):
+                files.append({
+                    "filename": filename,
+                    "path": os.path.join(UPLOAD_FOLDER, filename)
+                })
+        return jsonify({"files": files}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to list files: {str(e)}"}), 500
+
+@app.route("/uploads/download/<filename>", methods=["GET"])
+@app.route("/api/uploads/download/<filename>", methods=["GET"])
+def download_file(filename):
+    """Allows remote Windows hosts to download the installer."""
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

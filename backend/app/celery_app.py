@@ -5,7 +5,8 @@ def make_celery():
     celery = Celery(
         "app",
         broker=Config.CELERY_BROKER_URL,
-        backend=Config.CELERY_RESULT_BACKEND
+        backend=Config.CELERY_RESULT_BACKEND,
+	include=["app.tasks"]  # Explicitly imports tasks module
     )
     celery.conf.update(
         task_track_started=True,

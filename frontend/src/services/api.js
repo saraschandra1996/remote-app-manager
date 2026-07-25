@@ -12,3 +12,17 @@ export const createJob = (payload) =>
 
 export const getJobStatus = (jobId) => 
   axios.get(`${API_BASE}/jobs/${jobId}`);
+
+// --- NEW FILE UPLOAD ENDPOINTS ---
+
+export const uploadFile = (file, onUploadProgress) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return axios.post(`${API_BASE}/upload`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress,
+  });
+};
+
+export const getUploadedFiles = () => 
+  axios.get(`${API_BASE}/uploads`);
