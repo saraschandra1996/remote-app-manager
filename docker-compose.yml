@@ -1,0 +1,79 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Redis - Message Broker for Celery & Real-time State
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: app_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Flask API Server
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: app_backend
+    restart: always
+    command: python -m app.main
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - DATABASE_URL=sqlite:////app/data/app.db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=change-this-to-a-secure-random-key
+      - PYTHONPATH=/app
+    volumes:
+      - ./backend/app:/app/app
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Celery Background Worker (Runs WinRM Parallel Tasks)
+  # ---------------------------------------------------------------------------
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: app_celery_worker
+    restart: always
+    command: celery -A app.celery_app.celery_app worker --loglevel=info --concurrency=20
+    environment:
+      - DATABASE_URL=sqlite:////app/data/app.db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=change-this-to-a-secure-random-key
+      - PYTHONPATH=/app
+    volumes:
+      - ./backend/app:/app/app
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # React  Server
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: app_frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  sqlite_data:
