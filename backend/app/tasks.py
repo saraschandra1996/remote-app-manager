@@ -33,16 +33,21 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
         password = credentials.get("password")
 
         try:
-            # 1. Update status to IN_PROGRESS
             host_status.status = "IN_PROGRESS"
-            host_status.progress_percent = 25
+            host_status.progress_percent = 15
             host_status.log_output = f"Connecting via WinRM to {target_host}..."
             db.session.commit()
 
             winrm_client = WinRMService(target_host, username, password)
 
             if action == "INSTALL":
-                # Check if it's a file we uploaded to the backend container
+                host_status.progress_percent = 25
+                host_status.log_output = "Taking pre-installation registry snapshot..."
+                db.session.commit()
+                
+                pre_install_discovery = RegistryService.fetch_installed_applications(target_host, username, password)
+                pre_installed_apps = {app["name"]: app["version"] for app in pre_install_discovery.get("apps", [])} if pre_install_discovery.get("success") else {}
+
                 if installer_path and installer_path.startswith("/app/uploads"):
                     filename = os.path.basename(installer_path)
                     download_url = f"http://{server_host}/api/uploads/download/{filename}"
@@ -52,35 +57,79 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     host_status.log_output = f"Downloading {filename} to target machine..."
                     db.session.commit()
 
-                    # Set correct silent arguments for MSI vs EXE
+                    # --- FIXED: Direct execution bypassing cmd.exe and protecting against premature deletion ---
                     if filename.lower().endswith(".msi"):
-                        install_cmd = f"msiexec.exe /i {remote_dest} /qn /norestart"
+                        ps_script = f"""
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        Invoke-WebRequest -Uri "{download_url}" -OutFile "{remote_dest}" -UseBasicParsing
+                        
+                        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"{remote_dest}`" /qn /norestart" -PassThru -WindowStyle Hidden
+                        try {{
+                            if ($proc) {{ $proc | Wait-Process -Timeout 300 -ErrorAction Stop }}
+                        }} catch {{
+                            if ($proc) {{ $proc | Stop-Process -Force -ErrorAction SilentlyContinue }}
+                        }} finally {{
+                            Remove-Item -Path "{remote_dest}" -Force -ErrorAction SilentlyContinue
+                        }}
+                        """
                     else:
-                        install_cmd = f"{remote_dest} /S /quiet"
-
-                    ps_script = f"""
-                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                    Invoke-WebRequest -Uri "{download_url}" -OutFile "{remote_dest}" -UseBasicParsing
-                    Start-Process -FilePath "cmd.exe" -ArgumentList '/c "{install_cmd}"' -Wait -NoNewWindow
-                    Remove-Item -Path "{remote_dest}" -Force
-                    """
+                        ps_script = f"""
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        Invoke-WebRequest -Uri "{download_url}" -OutFile "{remote_dest}" -UseBasicParsing
+                        
+                        $proc = Start-Process -FilePath "{remote_dest}" -ArgumentList "/S /VERYSILENT /quiet /norestart" -PassThru -WindowStyle Hidden
+                        try {{
+                            if ($proc) {{ $proc | Wait-Process -Timeout 300 -ErrorAction Stop }}
+                            
+                            # CRITICAL: Wait 30 seconds before cleaning up the temp file
+                            # This allows background extraction processes to complete before the source is deleted.
+                            Start-Sleep -Seconds 30
+                        }} catch {{
+                            if ($proc) {{ $proc | Stop-Process -Force -ErrorAction SilentlyContinue }}
+                        }} finally {{
+                            Remove-Item -Path "{remote_dest}" -Force -ErrorAction SilentlyContinue
+                        }}
+                        """
                 else:
-                    # Fallback for standard UNC network paths
                     host_status.progress_percent = 50
                     host_status.log_output = f"Executing UNC path installer: {installer_path}..."
                     db.session.commit()
                     
-                    # FIXED: Added single quotes around the /c argument to protect spaces in the UNC path
                     ps_script = f"""
-                    Start-Process -FilePath "cmd.exe" -ArgumentList '/c "{installer_path}"' -Wait -NoNewWindow
+                    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList '/c `"{installer_path}`"' -PassThru -WindowStyle Hidden
+                    try {{
+                        if ($proc) {{ $proc | Wait-Process -Timeout 300 -ErrorAction Stop }}
+                        Start-Sleep -Seconds 30
+                    }} catch {{
+                        if ($proc) {{ $proc | Stop-Process -Force -ErrorAction SilentlyContinue }}
+                    }}
                     """
 
                 result = winrm_client.run_powershell(ps_script)
 
                 if result["success"]:
+                    host_status.progress_percent = 80
+                    host_status.log_output = "Installation command succeeded. Verifying registry for new application..."
+                    db.session.commit()
+                    
+                    # Extra buffer to ensure registry writes have flushed
+                    time.sleep(10) 
+                    
+                    post_install_discovery = RegistryService.fetch_installed_applications(target_host, username, password)
+                    post_installed_apps = {app["name"]: app["version"] for app in post_install_discovery.get("apps", [])} if post_install_discovery.get("success") else {}
+                    
+                    new_apps = [name for name in post_installed_apps.keys() if name not in pre_installed_apps]
+                    
                     host_status.status = "SUCCESS"
                     host_status.progress_percent = 100
-                    host_status.log_output = "Installation completed successfully."
+                    
+                    if new_apps:
+                        # Grab the first newly detected app name
+                        new_app_name = new_apps[0] 
+                        new_app_version = post_installed_apps[new_app_name]
+                        host_status.log_output = f"Verified Successfully: Installed '{new_app_name}' (v{new_app_version})."
+                    else:
+                        host_status.log_output = "Installation completed successfully (Exit Code 0), but no explicit new registry entry was detected."
                 else:
                     host_status.status = "FAILED"
                     host_status.progress_percent = 100
@@ -91,7 +140,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                 host_status.log_output = f"Verifying registry installation for {app_name}..."
                 db.session.commit()
 
-                # Step 1: Verify application presence & version on target host
                 discovery = RegistryService.fetch_installed_applications(target_host, username, password)
                 
                 if not discovery.get("success"):
@@ -101,7 +149,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     db.session.commit()
                     return {"status": "FAILED"}
 
-                # Search matching app by display name
                 matched_app = next((a for a in discovery.get("apps", []) if a["name"] == app_name), None)
 
                 if not matched_app:
@@ -111,25 +158,118 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     db.session.commit()
                     return {"status": "MISMATCH"}
 
-                # Step 2: Execute uninstall using target's registry uninstall string
-                host_status.progress_percent = 70
+                host_status.progress_percent = 60
                 host_status.app_version = matched_app["version"]
-                host_status.log_output = f"Uninstalling version {matched_app['version']} using registry key..."
+                host_status.log_output = f"Attempting primary registry uninstallation for {app_name}..."
                 db.session.commit()
 
                 target_uninstall_cmd = matched_app.get("uninstall_string") or uninstall_key
-                uninstall_res = RegistryService.execute_registry_uninstall(
-                    target_host, username, password, target_uninstall_cmd
-                )
+                safe_cmd = (target_uninstall_cmd or "").replace("'", "''")
+                
+                ps_script = f"""
+                $rawCmd = '{safe_cmd}'
+                $exePath = $rawCmd
+                $arguments = ""
 
-                if uninstall_res["success"]:
-                    host_status.status = "SUCCESS"
-                    host_status.progress_percent = 100
-                    host_status.log_output = f"Successfully uninstalled {app_name} (v{matched_app['version']})."
-                else:
+                if ($rawCmd -match '^"([^"]+)"\s*(.*)') {{
+                    $exePath = $Matches[1]
+                    $arguments = $Matches[2]
+                }} elseif ($rawCmd -match '^([^\s]+\.exe)\s*(.*)') {{
+                    $exePath = $Matches[1]
+                    $arguments = $Matches[2]
+                }}
+
+                if ($exePath -match '(?i)\.exe$') {{
+                    $arguments = "/S /VERYSILENT /quiet /norestart"
+                    
+                    if (Test-Path $exePath) {{
+                        $appDir = Split-Path $exePath -Parent
+                        $arguments += " _?=$appDir"
+                    }}
+                    
+                    try {{
+                        $proc = Start-Process -FilePath $exePath -ArgumentList $arguments -PassThru -WindowStyle Hidden -ErrorAction Stop
+                        if ($proc) {{ $proc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue }}
+                    }} catch {{ }}
+                    
+                }} elseif ($exePath -match '(?i)msiexec') {{
+                    $arguments = $arguments -replace '(?i)/[ix]', '/X'
+                    if ($arguments -notmatch '(?i)/qn') {{
+                        $arguments += " /qn /norestart"
+                    }}
+                    
+                    try {{
+                        $proc = Start-Process -FilePath $exePath -ArgumentList $arguments -PassThru -WindowStyle Hidden -ErrorAction Stop
+                        if ($proc) {{ $proc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue }}
+                    }} catch {{ }}
+                    
+                }} else {{
+                    try {{
+                        $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$rawCmd`"" -PassThru -WindowStyle Hidden -ErrorAction Stop
+                        if ($proc) {{ $proc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue }}
+                    }} catch {{ }}
+                }}
+                """
+                winrm_client.run_powershell(ps_script)
+
+                # ==========================================================
+                # Verification & Fallback System
+                # ==========================================================
+                host_status.progress_percent = 70
+                host_status.log_output = "Waiting and verifying uninstallation status..."
+                db.session.commit()
+
+                def check_is_installed():
+                    ver = RegistryService.fetch_installed_applications(target_host, username, password)
+                    if not ver.get("success"):
+                        return True 
+                    return any(a["name"] == app_name for a in ver.get("apps", []))
+
+                still_installed = True
+                
+                for _ in range(3):
+                    time.sleep(10)
+                    if not check_is_installed():
+                        still_installed = False
+                        break
+
+                if still_installed:
+                    host_status.progress_percent = 80
+                    host_status.log_output = f"Primary method incomplete. Attempting WMI fallback for {app_name}..."
+                    db.session.commit()
+                    
+                    wmi_script = f'wmic product where "name like \'%{app_name}%\'" call uninstall /nointeractive'
+                    winrm_client.run_powershell(wmi_script)
+                    
+                    for _ in range(2):
+                        time.sleep(10)
+                        if not check_is_installed():
+                            still_installed = False
+                            break
+
+                if still_installed:
+                    host_status.progress_percent = 90
+                    host_status.log_output = f"WMI method incomplete. Attempting PackageManagement fallback..."
+                    db.session.commit()
+                    
+                    pkg_script = f'Get-Package -Name "{app_name}" -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue'
+                    winrm_client.run_powershell(pkg_script)
+                    
+                    for _ in range(2):
+                        time.sleep(10)
+                        if not check_is_installed():
+                            still_installed = False
+                            break
+
+                if still_installed:
                     host_status.status = "FAILED"
                     host_status.progress_percent = 100
-                    host_status.log_output = f"Uninstall failed: {uninstall_res['stderr']}"
+                    host_status.log_output = f"Verification Failed: '{app_name}' is still installed after all remote attempts."
+                else:
+                    host_status.status = "SUCCESS"
+                    host_status.progress_percent = 100
+                    host_status.log_output = f"Successfully verified uninstallation of {app_name} (v{matched_app['version']})."
+                # ==========================================================
 
             db.session.commit()
             return {"status": host_status.status, "host": target_host}
@@ -142,14 +282,8 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
             return {"status": "FAILED", "error": str(e)}
 
 
-# ---------------------------------------------------------------------------
-# Callback Task to finalize the job after all hosts are done
-# ---------------------------------------------------------------------------
 @celery_app.task(bind=True, name="app.tasks.finalize_job")
 def finalize_job(self, results, job_id):
-    """
-    This runs automatically after ALL process_single_host tasks complete.
-    """
     app = get_flask_app()
     with app.app_context():
         job = Job.query.get(job_id)
@@ -160,15 +294,8 @@ def finalize_job(self, results, job_id):
     return {"status": "COMPLETED", "job_id": job_id}
 
 
-# ---------------------------------------------------------------------------
-# Master Orchestrator
-# ---------------------------------------------------------------------------
 @celery_app.task(bind=True, name="app.tasks.execute_bulk_operation")
 def execute_bulk_operation(self, job_id, credentials, server_host="localhost"):
-    """
-    Master orchestrator: Fetches all target hosts and launches sub-tasks 
-    using a Celery chord to prevent synchronous blocking.
-    """
     app = get_flask_app()
     with app.app_context():
         job = Job.query.get(job_id)
@@ -180,7 +307,6 @@ def execute_bulk_operation(self, job_id, credentials, server_host="localhost"):
 
         hosts = HostStatus.query.filter_by(job_id=job_id).all()
 
-        # Build parallel task signatures
         subtasks = [
             process_single_host.s(
                 host_status_id=h.id,
@@ -194,7 +320,6 @@ def execute_bulk_operation(self, job_id, credentials, server_host="localhost"):
             for h in hosts
         ]
 
-        # Use a chord: Run all subtasks, then call finalize_job
         chord(subtasks)(finalize_job.s(job_id=job_id))
 
         return {"status": "LAUNCHED", "job_id": job_id}
