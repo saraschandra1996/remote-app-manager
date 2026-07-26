@@ -5,7 +5,7 @@ Prerequisites: A fresh Ubuntu 22.04 or 24.04 server with root or sudo access and
 **Step 1:** System Update & Basic Tools
 First, ensure the server's package index is up to date and install Git.
 
-Bash
+
 sudo apt-get update
 sudo apt-get upgrade -y
 sudo apt-get install -y git curl
