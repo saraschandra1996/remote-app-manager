@@ -23,7 +23,7 @@ sudo apt-get install -y git curl
 ```
 ---
 
-Step 2: Install Docker & Docker Compose
+#### Step 2: Install Docker & Docker Compose
 Install the official Docker engine and the Compose plugin directly from Docker's repositories.
 
 # Add Docker's official GPG key and repository
