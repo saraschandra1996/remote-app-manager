@@ -20,7 +20,7 @@ First, ensure the server's package index is up to date and install Git.
 sudo apt-get update
 sudo apt-get upgrade -y
 sudo apt-get install -y git curl
-
+'''
 ---
 
 Step 2: Install Docker & Docker Compose
