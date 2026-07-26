@@ -35,3 +35,5 @@ export const uploadFile = (file, onUploadProgress) => {
 
 export const getUploadedFiles = () => 
   axios.get(`${API_BASE}/uploads`);
+
+export const deleteFile = (filename) => axios.delete(`${API_BASE}/uploads/${filename}`);

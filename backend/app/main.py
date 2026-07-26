@@ -51,9 +51,8 @@ def discover_apps():
     except Exception as e:
         return jsonify({"error": f"Backend Server Exception: {str(e)}"}), 500
 
-
 # ---------------------------------------------------------------------------
-# Job Creation Endpoint
+# Job Creation Endpoint (UPDATED)
 # ---------------------------------------------------------------------------
 @app.route("/jobs", methods=["POST"])
 @app.route("/api/jobs", methods=["POST"])
@@ -67,6 +66,7 @@ def create_job():
     app_name = data.get("app_name")
     uninstall_key = data.get("uninstall_key")
     installer_path = data.get("installerPath") or data.get("installer_path")
+    additional_args = data.get("additional_args", "") # NEW: Capture custom arguments
 
     if not hostnames or not username or not password:
         return jsonify({"error": "Hostnames, username, and password are required"}), 400
@@ -79,7 +79,7 @@ def create_job():
         app_name=app_name,
         uninstall_key=uninstall_key,
         installer_path=installer_path,
-	admin_username=username,
+        admin_username=username,
         status="PENDING"
     )
     db.session.add(job)
@@ -101,13 +101,12 @@ def create_job():
     db.session.commit()
 
     credentials = {"username": username, "password": password}
-    server_host = request.host  # Get the server IP automatically
-
-    # Update this line to pass the server_host
-    execute_bulk_operation.delay(job_id, credentials, server_host)
+    server_host = request.host 
+    
+    # NEW: Pass additional_args to Celery
+    execute_bulk_operation.delay(job_id, credentials, server_host, additional_args)
 
     return jsonify({"job_id": job_id, "status": "QUEUED"}), 201
-
 
 # ---------------------------------------------------------------------------
 # Get Job Status Endpoint
@@ -257,6 +256,22 @@ def upload_file():
             return jsonify({"error": f"Failed to save file: {str(e)}"}), 500
             
     return jsonify({"error": "Invalid file type. Only .exe and .msi are allowed."}), 400
+
+# ---------------------------------------------------------------------------
+# Delete Uploaded File Endpoint (NEW)
+# ---------------------------------------------------------------------------
+@app.route("/uploads/<filename>", methods=["DELETE"])
+@app.route("/api/uploads/<filename>", methods=["DELETE"])
+def delete_file(filename):
+    try:
+        secure_name = secure_filename(filename)
+        file_path = os.path.join(UPLOAD_FOLDER, secure_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            return jsonify({"message": f"Deleted {secure_name}"}), 200
+        return jsonify({"error": "File not found"}), 404
+    except Exception as e:
+        return jsonify({"error": f"Failed to delete file: {str(e)}"}), 500
 
 # ---------------------------------------------------------------------------
 # List Uploaded Files Endpoint (For React Dropdown)

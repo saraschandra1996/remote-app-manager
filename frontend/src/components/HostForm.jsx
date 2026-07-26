@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Search, Shield, HardDrive, Globe, AlertTriangle, UploadCloud } from 'lucide-react';
-import { uploadFile, getUploadedFiles } from '../services/api'; // Ensure correct path
+import { Play, Search, Shield, HardDrive, Globe, AlertTriangle, UploadCloud, Trash2, Key } from 'lucide-react';
+import { uploadFile, getUploadedFiles, deleteFile } from '../services/api';
 
 export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
   const [action, setAction] = useState('INSTALL');
@@ -9,8 +9,10 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [installerPath, setInstallerPath] = useState('');
+  
+  // NEW: State for additional arguments
+  const [additionalArgs, setAdditionalArgs] = useState('');
 
-  // New states for File Upload & Selection
   const [availableFiles, setAvailableFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -42,12 +44,27 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
       });
       
       await fetchFiles();
-      // Auto-select the newly uploaded file
       setInstallerPath(response.data.path);
     } catch (error) {
       alert("File upload failed. Ensure it is an .exe or .msi under 2GB.");
     } finally {
       setUploading(false);
+    }
+  };
+
+  // NEW: Handle File Deletion
+  const handleDeleteFile = async () => {
+    if (!installerPath) return;
+    const filename = installerPath.split('/').pop().split('\\').pop();
+    
+    if (!window.confirm(`Are you sure you want to permanently delete '${filename}' from the server?`)) return;
+    
+    try {
+      await deleteFile(filename);
+      setInstallerPath(''); // Clear the selection
+      fetchFiles();         // Refresh the dropdown list
+    } catch (err) {
+      alert("Failed to delete file: " + (err.response?.data?.error || err.message));
     }
   };
 
@@ -75,7 +92,8 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
         hostnames: hostList,
         username,
         password,
-        installerPath
+        installerPath,
+        additional_args: additionalArgs // NEW: Pass the arguments to the backend
       });
     }
   };
@@ -87,7 +105,6 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
       </h2>
 
       <form onSubmit={handleActionSubmit} className="space-y-5">
-        {/* Action Toggle */}
         <div className="grid grid-cols-2 gap-3 bg-slate-900 p-1 rounded-lg border border-slate-700">
           <button
             type="button"
@@ -109,7 +126,6 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
           </button>
         </div>
 
-        {/* Domain Name */}
         <div>
           <label className="block text-xs font-semibold text-slate-300 uppercase mb-1 flex items-center gap-1">
             <Globe className="w-4 h-4 text-slate-400" /> Domain Name (Optional)
@@ -123,7 +139,6 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
           />
         </div>
 
-        {/* Target Hostnames */}
         <div>
           <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">
             Target Hostnames (One per line or comma-separated)
@@ -138,28 +153,43 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
           ></textarea>
         </div>
 
-        {/* --- UPDATED: Installer Path & Upload Selection --- */}
         {action === 'INSTALL' && (
-          <div className="bg-slate-900 border border-slate-700 rounded-lg p-4 space-y-3">
-            <label className="block text-xs font-semibold text-slate-300 uppercase mb-1 flex items-center gap-1">
-              <UploadCloud className="w-4 h-4 text-slate-400" /> Installer File Selection
-            </label>
+          <div className="bg-slate-900 border border-slate-700 rounded-lg p-4 space-y-4">
             
-            <select
-              value={installerPath}
-              onChange={(e) => setInstallerPath(e.target.value)}
-              required
-              className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 text-sm"
-            >
-              <option value="">-- Select an uploaded installer --</option>
-              {availableFiles.map((file, idx) => (
-                <option key={idx} value={file.path}>
-                  {file.filename}
-                </option>
-              ))}
-            </select>
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1 flex items-center gap-1">
+                <UploadCloud className="w-4 h-4 text-slate-400" /> Installer File Selection
+              </label>
+              
+              <div className="flex gap-2">
+                <select
+                  value={installerPath}
+                  onChange={(e) => setInstallerPath(e.target.value)}
+                  required
+                  className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 text-sm"
+                >
+                  <option value="">-- Select an uploaded installer --</option>
+                  {availableFiles.map((file, idx) => (
+                    <option key={idx} value={file.path}>
+                      {file.filename}
+                    </option>
+                  ))}
+                </select>
+                
+                {/* NEW: Delete Selected File Button */}
+                <button
+                  type="button"
+                  onClick={handleDeleteFile}
+                  disabled={!installerPath || !installerPath.startsWith('/app/uploads')}
+                  title="Delete selected file"
+                  className="px-3 bg-slate-800 border border-slate-600 rounded-lg text-slate-400 hover:text-rose-400 hover:border-rose-500 hover:bg-rose-950/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
 
-            <div className="flex items-center gap-4 border-t border-slate-700 pt-3 mt-3">
+            <div className="flex items-center gap-4 border-t border-slate-700 pt-3">
               <span className="text-xs font-semibold text-slate-400 uppercase">Or upload new:</span>
               <input
                 type="file"
@@ -174,10 +204,23 @@ export default function HostForm({ onSubmit, onDiscoverApps, loading }) {
                 </span>
               )}
             </div>
+
+            {/* NEW: Additional Arguments / License Key Input */}
+            <div className="border-t border-slate-700 pt-3">
+              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1 flex items-center gap-1">
+                <Key className="w-4 h-4 text-slate-400" /> Additional Arguments / License Key (Optional)
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. LICENSEKEY=12345 /LOG=C:\temp\install.log"
+                value={additionalArgs}
+                onChange={(e) => setAdditionalArgs(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-indigo-500 text-sm font-mono"
+              />
+            </div>
           </div>
         )}
 
-        {/* Remote Credentials */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-700">
           <div>
             <label className="block text-xs font-semibold text-slate-300 uppercase mb-1 flex items-center gap-1">

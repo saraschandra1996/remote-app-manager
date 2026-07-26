@@ -17,7 +17,7 @@ def get_flask_app():
 
 
 @celery_app.task(bind=True, name="app.tasks.process_single_host")
-def process_single_host(self, host_status_id, action, credentials, installer_path=None, app_name=None, uninstall_key=None, server_host=None):
+def process_single_host(self, host_status_id, action, credentials, installer_path=None, app_name=None, uninstall_key=None, server_host=None, additional_args=""):
     """
     Sub-task running concurrently for each target host.
     Executes PyWinRM operations and updates real-time status in SQLite.
@@ -56,7 +56,7 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     remote_dest = f"C:\\Windows\\Temp\\{filename}"
                     
                     host_status.progress_percent = 40
-                    host_status.log_output = f"Transferring {filename} to Traget machine {target_host}"
+                    host_status.log_output = f"Transferring {filename} to Target machine {target_host}"
                     db.session.commit()
 
                     if filename.lower().endswith(".msi"):
@@ -65,7 +65,7 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                         Invoke-WebRequest -Uri "{download_url}" -OutFile "{remote_dest}" -UseBasicParsing
                         
-                        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"{remote_dest}`" /qn /norestart" -PassThru -WindowStyle Hidden
+                        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"{remote_dest}`" /qn /norestart {additional_args}" -PassThru -WindowStyle Hidden
                         try {{
                             if ($proc) {{ $proc | Wait-Process -Timeout 300 -ErrorAction Stop }}
                         }} catch {{
@@ -80,7 +80,7 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                         Invoke-WebRequest -Uri "{download_url}" -OutFile "{remote_dest}" -UseBasicParsing
                         
-                        $proc = Start-Process -FilePath "{remote_dest}" -ArgumentList "/S /VERYSILENT /quiet /norestart" -PassThru -WindowStyle Hidden
+                        $proc = Start-Process -FilePath "{remote_dest}" -ArgumentList "/S /VERYSILENT /quiet /norestart {additional_args}" -PassThru -WindowStyle Hidden
                         try {{
                             if ($proc) {{ $proc | Wait-Process -Timeout 300 -ErrorAction Stop }}
                             Start-Sleep -Seconds 30
@@ -96,7 +96,7 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     db.session.commit()
                     
                     ps_script = f"""
-                    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList '/c `"{installer_path}`"' -PassThru -WindowStyle Hidden
+                    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList '/c `"{installer_path}`" {additional_args}' -PassThru -WindowStyle Hidden
                     try {{
                         if ($proc) {{ $proc | Wait-Process -Timeout 300 -ErrorAction Stop }}
                         Start-Sleep -Seconds 30
@@ -172,7 +172,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                 target_uninstall_cmd = matched_app.get("uninstall_string") or uninstall_key
                 safe_cmd = (target_uninstall_cmd or "").replace("'", "''")
                 
-                # --- OPTIMIZED: Timeout dropped from 120s to 60s ---
                 ps_script = f"""
                 $rawCmd = '{safe_cmd}'
                 $exePath = $rawCmd
@@ -227,7 +226,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                 still_installed = True
                 success_method = "Primary Registry String"
                 
-                # --- TIMER 1: Primary Method (Max ~84 seconds wasted if hung) ---
                 primary_start = time.time()
                 winrm_client.run_powershell(ps_script)
 
@@ -235,7 +233,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                 host_status.log_output = "Verifying registry string uninstallation status..."
                 db.session.commit()
                 
-                # Check immediately, sleep briefly (max 24 seconds total wait)
                 for _ in range(8):
                     if not check_is_installed():
                         still_installed = False
@@ -244,7 +241,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     
                 primary_elapsed = time.time() - primary_start
 
-                # --- TIMER 2: WMI Fallback ---
                 if still_installed:
                     host_status.progress_percent = 80
                     host_status.log_output = f"registry string method failed ({primary_elapsed:.1f}s). Attempting WMI uninstallation for {app_name}"
@@ -254,7 +250,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     wmi_script = f'wmic product where "name like \'%{app_name}%\'" call uninstall /nointeractive'
                     winrm_client.run_powershell(wmi_script)
                     
-                    # Dropped to 5 checks (max 15 seconds)
                     for _ in range(5):
                         if not check_is_installed():
                             still_installed = False
@@ -264,7 +259,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                         
                     wmi_elapsed = time.time() - wmi_start
 
-                    # --- TIMER 3: Package Management Fallback ---
                     if still_installed:
                         host_status.progress_percent = 90
                         host_status.log_output = f"WMI method failed ({wmi_elapsed:.1f}s). Attempting PackageManagement uninstallation for {app_name}"
@@ -274,7 +268,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                         pkg_script = f'Get-Package -Name "{app_name}" -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue'
                         winrm_client.run_powershell(pkg_script)
                         
-                        # Dropped to 5 checks (max 15 seconds)
                         for _ in range(5):
                             if not check_is_installed():
                                 still_installed = False
@@ -284,7 +277,6 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                             
                         pkg_elapsed = time.time() - pkg_start
 
-                # --- Final Result ---
                 if still_installed:
                     host_status.status = "FAILED"
                     host_status.progress_percent = 100
@@ -326,7 +318,7 @@ def finalize_job(self, results, job_id):
 
 
 @celery_app.task(bind=True, name="app.tasks.execute_bulk_operation")
-def execute_bulk_operation(self, job_id, credentials, server_host="localhost"):
+def execute_bulk_operation(self, job_id, credentials, server_host="localhost", additional_args=""):
     app = get_flask_app()
     with app.app_context():
         job = Job.query.get(job_id)
@@ -346,7 +338,8 @@ def execute_bulk_operation(self, job_id, credentials, server_host="localhost"):
                 installer_path=job.installer_path,
                 app_name=job.app_name,
                 uninstall_key=job.uninstall_key,
-                server_host=server_host
+                server_host=server_host,
+                additional_args=additional_args
             )
             for h in hosts
         ]
