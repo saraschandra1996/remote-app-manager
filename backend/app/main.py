@@ -1,4 +1,5 @@
 import uuid
+from app.celery_app import celery_app
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask import send_from_directory
@@ -125,6 +126,7 @@ def get_job_status(job_id):
         "created_at": job.created_at.isoformat(),
         "hosts": [
             {
+		"id": h.id,
                 "hostname": h.hostname,
                 "fqdn": h.fqdn,
                 "status": h.status,
@@ -134,6 +136,53 @@ def get_job_status(job_id):
             for h in hosts
         ]
     })
+
+# ---------------------------------------------------------------------------
+# Individual Host Cancellation Endpoint
+# ---------------------------------------------------------------------------
+@app.route("/jobs/<job_id>/hosts/<int:host_id>/cancel", methods=["POST"])
+@app.route("/api/jobs/<job_id>/hosts/<int:host_id>/cancel", methods=["POST"])
+def cancel_single_host(job_id, host_id):
+    host = HostStatus.query.get(host_id)
+    if not host or host.job_id != job_id:
+        return jsonify({"error": "Host task not found"}), 404
+
+    if host.status in ["COMPLETED", "FAILED", "CANCELLED", "SUCCESS", "MISMATCH"]:
+        return jsonify({"message": f"Host task is already {host.status}"}), 400
+
+    # 1. Update the database status
+    host.status = "CANCELLED"
+    host.log_output += "\n\n[System] Execution forcefully cancelled by user."
+    db.session.commit()
+
+    # 2. Hunt down and terminate only this specific Celery task
+    try:
+        inspector = celery_app.control.inspect()
+        active_tasks = inspector.active() or {}
+        reserved_tasks = inspector.reserved() or {}
+        
+        task_to_revoke = None
+        
+        def find_host_task(task_dict):
+            for worker_name, tasks in task_dict.items():
+                for task in tasks:
+                    if task.get("name") == "app.tasks.process_single_host":
+                        kwargs = task.get("kwargs", {})
+                        args = task.get("args", [])
+                        h_id = kwargs.get("host_status_id") if "host_status_id" in kwargs else (args[0] if len(args) > 0 else None)
+                        if h_id == host_id:
+                            return task["id"]
+            return None
+
+        task_to_revoke = find_host_task(active_tasks) or find_host_task(reserved_tasks)
+        
+        if task_to_revoke:
+            celery_app.control.revoke(task_to_revoke, terminate=True, signal="SIGTERM")
+            
+    except Exception as e:
+        print(f"Warning: Failed to contact Celery workers for revocation: {str(e)}")
+
+    return jsonify({"message": "Host task cancelled successfully", "host_id": host_id}), 200
 
 import os
 from werkzeug.utils import secure_filename
@@ -198,6 +247,74 @@ def list_uploads():
 def download_file(filename):
     """Allows remote Windows hosts to download the installer."""
     return send_from_directory(UPLOAD_FOLDER, filename)
+
+# ---------------------------------------------------------------------------
+# Task Cancellation Endpoint
+# ---------------------------------------------------------------------------
+@app.route("/jobs/<job_id>/cancel", methods=["POST"])
+@app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
+def cancel_job(job_id):
+    job = Job.query.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    if job.status in ["COMPLETED", "FAILED", "CANCELLED"]:
+        return jsonify({"message": f"Job is already {job.status}"}), 400
+
+    # 1. Update the database statuses to CANCELLED
+    job.status = "CANCELLED"
+    
+    hosts = HostStatus.query.filter_by(job_id=job_id).all()
+    host_status_ids = []
+    
+    for h in hosts:
+        if h.status in ["PENDING", "IN_PROGRESS", "SCANNING"]:
+            h.status = "CANCELLED"
+            h.log_output += "\n\n[System] Execution forcefully cancelled by user."
+        host_status_ids.append(h.id)
+        
+    db.session.commit()
+
+    # 2. Hunt down and terminate the active Celery tasks
+    try:
+        inspector = celery_app.control.inspect()
+        active_tasks = inspector.active() or {}
+        reserved_tasks = inspector.reserved() or {}
+        
+        tasks_to_revoke = []
+        
+        # Helper function to find matching tasks across all workers
+        def find_target_tasks(task_dict):
+            for worker_name, tasks in task_dict.items():
+                for task in tasks:
+                    task_name = task.get("name")
+                    kwargs = task.get("kwargs", {})
+                    args = task.get("args", [])
+                    
+                    # Check if it's the parent bulk operation task
+                    if task_name == "app.tasks.execute_bulk_operation":
+                        if job_id in args or kwargs.get("job_id") == job_id:
+                            tasks_to_revoke.append(task["id"])
+                            
+                    # Check if it's a child single host task
+                    elif task_name == "app.tasks.process_single_host":
+                        # The ID might be passed as a kwarg or the first arg
+                        h_id = kwargs.get("host_status_id") if "host_status_id" in kwargs else (args[0] if len(args) > 0 else None)
+                        if h_id in host_status_ids:
+                            tasks_to_revoke.append(task["id"])
+
+        # Scan both running and queued tasks
+        find_target_tasks(active_tasks)
+        find_target_tasks(reserved_tasks)
+        
+        # 3. Fire the termination signal
+        for task_id in tasks_to_revoke:
+            celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+            
+    except Exception as e:
+        print(f"Warning: Failed to contact Celery workers for revocation: {str(e)}")
+
+    return jsonify({"message": "Job cancelled successfully", "job_id": job_id}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

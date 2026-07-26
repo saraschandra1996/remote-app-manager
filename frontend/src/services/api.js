@@ -13,6 +13,12 @@ export const createJob = (payload) =>
 export const getJobStatus = (jobId) => 
   axios.get(`${API_BASE}/jobs/${jobId}`);
 
+export const cancelJob = (jobId) => 
+  axios.post(`${API_BASE}/jobs/${jobId}/cancel`);
+
+export const cancelHostTask = (jobId, hostId) => 
+  axios.post(`${API_BASE}/jobs/${jobId}/hosts/${hostId}/cancel`);
+
 // --- NEW FILE UPLOAD ENDPOINTS ---
 
 export const uploadFile = (file, onUploadProgress) => {
