@@ -48,18 +48,20 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                 pre_install_discovery = RegistryService.fetch_installed_applications(target_host, username, password)
                 pre_installed_apps = {app["name"]: app["version"] for app in pre_install_discovery.get("apps", [])} if pre_install_discovery.get("success") else {}
 
+                install_start_time = time.time() # START INSTALL TIMER
+
                 if installer_path and installer_path.startswith("/app/uploads"):
                     filename = os.path.basename(installer_path)
                     download_url = f"http://{server_host}/api/uploads/download/{filename}"
                     remote_dest = f"C:\\Windows\\Temp\\{filename}"
                     
                     host_status.progress_percent = 40
-                    host_status.log_output = f"Downloading {filename} to target machine..."
+                    host_status.log_output = f"Transferring {filename} to Traget machine {target_host}"
                     db.session.commit()
 
-                    # --- FIXED: Direct execution bypassing cmd.exe and protecting against premature deletion ---
                     if filename.lower().endswith(".msi"):
                         ps_script = f"""
+                        $ProgressPreference = 'SilentlyContinue'
                         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                         Invoke-WebRequest -Uri "{download_url}" -OutFile "{remote_dest}" -UseBasicParsing
                         
@@ -74,15 +76,13 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                         """
                     else:
                         ps_script = f"""
+                        $ProgressPreference = 'SilentlyContinue'
                         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                         Invoke-WebRequest -Uri "{download_url}" -OutFile "{remote_dest}" -UseBasicParsing
                         
                         $proc = Start-Process -FilePath "{remote_dest}" -ArgumentList "/S /VERYSILENT /quiet /norestart" -PassThru -WindowStyle Hidden
                         try {{
                             if ($proc) {{ $proc | Wait-Process -Timeout 300 -ErrorAction Stop }}
-                            
-                            # CRITICAL: Wait 30 seconds before cleaning up the temp file
-                            # This allows background extraction processes to complete before the source is deleted.
                             Start-Sleep -Seconds 30
                         }} catch {{
                             if ($proc) {{ $proc | Stop-Process -Force -ErrorAction SilentlyContinue }}
@@ -112,24 +112,30 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     host_status.log_output = "Installation command succeeded. Verifying registry for new application..."
                     db.session.commit()
                     
-                    # Extra buffer to ensure registry writes have flushed
-                    time.sleep(10) 
+                    installed_verified = False
+                    new_app_name, new_app_version = None, None
                     
-                    post_install_discovery = RegistryService.fetch_installed_applications(target_host, username, password)
-                    post_installed_apps = {app["name"]: app["version"] for app in post_install_discovery.get("apps", [])} if post_install_discovery.get("success") else {}
+                    for _ in range(6): 
+                        post_install_discovery = RegistryService.fetch_installed_applications(target_host, username, password)
+                        post_installed_apps = {app["name"]: app["version"] for app in post_install_discovery.get("apps", [])} if post_install_discovery.get("success") else {}
+                        
+                        new_apps = [name for name in post_installed_apps.keys() if name not in pre_installed_apps]
+                        if new_apps:
+                            installed_verified = True
+                            new_app_name = new_apps[0]
+                            new_app_version = post_installed_apps[new_app_name]
+                            break
+                        time.sleep(5)
                     
-                    new_apps = [name for name in post_installed_apps.keys() if name not in pre_installed_apps]
+                    install_elapsed = time.time() - install_start_time # END INSTALL TIMER
                     
                     host_status.status = "SUCCESS"
                     host_status.progress_percent = 100
                     
-                    if new_apps:
-                        # Grab the first newly detected app name
-                        new_app_name = new_apps[0] 
-                        new_app_version = post_installed_apps[new_app_name]
-                        host_status.log_output = f"Verified Successfully: Installed '{new_app_name}' (v{new_app_version})."
+                    if installed_verified:
+                        host_status.log_output = f"Verified Successfully: Installed '{new_app_name}' (v{new_app_version}) in {install_elapsed:.1f}s."
                     else:
-                        host_status.log_output = "Installation completed successfully (Exit Code 0), but no explicit new registry entry was detected."
+                        host_status.log_output = f"Installation completed successfully (Exit Code 0) in {install_elapsed:.1f}s, but no explicit new registry entry was detected."
                 else:
                     host_status.status = "FAILED"
                     host_status.progress_percent = 100
@@ -160,12 +166,13 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
 
                 host_status.progress_percent = 60
                 host_status.app_version = matched_app["version"]
-                host_status.log_output = f"Attempting primary registry uninstallation for {app_name}..."
+                host_status.log_output = f"Attempting uninstallation for {app_name} using registry string"
                 db.session.commit()
 
                 target_uninstall_cmd = matched_app.get("uninstall_string") or uninstall_key
                 safe_cmd = (target_uninstall_cmd or "").replace("'", "''")
                 
+                # --- OPTIMIZED: Timeout dropped from 120s to 60s ---
                 ps_script = f"""
                 $rawCmd = '{safe_cmd}'
                 $exePath = $rawCmd
@@ -189,7 +196,7 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     
                     try {{
                         $proc = Start-Process -FilePath $exePath -ArgumentList $arguments -PassThru -WindowStyle Hidden -ErrorAction Stop
-                        if ($proc) {{ $proc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue }}
+                        if ($proc) {{ $proc | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue }}
                     }} catch {{ }}
                     
                 }} elseif ($exePath -match '(?i)msiexec') {{
@@ -200,25 +207,17 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     
                     try {{
                         $proc = Start-Process -FilePath $exePath -ArgumentList $arguments -PassThru -WindowStyle Hidden -ErrorAction Stop
-                        if ($proc) {{ $proc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue }}
+                        if ($proc) {{ $proc | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue }}
                     }} catch {{ }}
                     
                 }} else {{
                     try {{
                         $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$rawCmd`"" -PassThru -WindowStyle Hidden -ErrorAction Stop
-                        if ($proc) {{ $proc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue }}
+                        if ($proc) {{ $proc | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue }}
                     }} catch {{ }}
                 }}
                 """
-                winrm_client.run_powershell(ps_script)
-
-                # ==========================================================
-                # Verification & Fallback System
-                # ==========================================================
-                host_status.progress_percent = 70
-                host_status.log_output = "Waiting and verifying uninstallation status..."
-                db.session.commit()
-
+                
                 def check_is_installed():
                     ver = RegistryService.fetch_installed_applications(target_host, username, password)
                     if not ver.get("success"):
@@ -226,50 +225,82 @@ def process_single_host(self, host_status_id, action, credentials, installer_pat
                     return any(a["name"] == app_name for a in ver.get("apps", []))
 
                 still_installed = True
+                success_method = "Primary Registry String"
                 
-                for _ in range(3):
-                    time.sleep(10)
+                # --- TIMER 1: Primary Method (Max ~84 seconds wasted if hung) ---
+                primary_start = time.time()
+                winrm_client.run_powershell(ps_script)
+
+                host_status.progress_percent = 70
+                host_status.log_output = "Verifying registry string uninstallation status..."
+                db.session.commit()
+                
+                # Check immediately, sleep briefly (max 24 seconds total wait)
+                for _ in range(8):
                     if not check_is_installed():
                         still_installed = False
                         break
+                    time.sleep(3)
+                    
+                primary_elapsed = time.time() - primary_start
 
+                # --- TIMER 2: WMI Fallback ---
                 if still_installed:
                     host_status.progress_percent = 80
-                    host_status.log_output = f"Primary method incomplete. Attempting WMI fallback for {app_name}..."
+                    host_status.log_output = f"registry string method failed ({primary_elapsed:.1f}s). Attempting WMI uninstallation for {app_name}"
                     db.session.commit()
                     
+                    wmi_start = time.time()
                     wmi_script = f'wmic product where "name like \'%{app_name}%\'" call uninstall /nointeractive'
                     winrm_client.run_powershell(wmi_script)
                     
-                    for _ in range(2):
-                        time.sleep(10)
+                    # Dropped to 5 checks (max 15 seconds)
+                    for _ in range(5):
                         if not check_is_installed():
                             still_installed = False
+                            success_method = "WMI Fallback"
                             break
+                        time.sleep(3)
+                        
+                    wmi_elapsed = time.time() - wmi_start
 
-                if still_installed:
-                    host_status.progress_percent = 90
-                    host_status.log_output = f"WMI method incomplete. Attempting PackageManagement fallback..."
-                    db.session.commit()
-                    
-                    pkg_script = f'Get-Package -Name "{app_name}" -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue'
-                    winrm_client.run_powershell(pkg_script)
-                    
-                    for _ in range(2):
-                        time.sleep(10)
-                        if not check_is_installed():
-                            still_installed = False
-                            break
+                    # --- TIMER 3: Package Management Fallback ---
+                    if still_installed:
+                        host_status.progress_percent = 90
+                        host_status.log_output = f"WMI method failed ({wmi_elapsed:.1f}s). Attempting PackageManagement uninstallation for {app_name}"
+                        db.session.commit()
+                        
+                        pkg_start = time.time()
+                        pkg_script = f'Get-Package -Name "{app_name}" -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue'
+                        winrm_client.run_powershell(pkg_script)
+                        
+                        # Dropped to 5 checks (max 15 seconds)
+                        for _ in range(5):
+                            if not check_is_installed():
+                                still_installed = False
+                                success_method = "PackageManagement Fallback"
+                                break
+                            time.sleep(3)
+                            
+                        pkg_elapsed = time.time() - pkg_start
 
+                # --- Final Result ---
                 if still_installed:
                     host_status.status = "FAILED"
                     host_status.progress_percent = 100
-                    host_status.log_output = f"Verification Failed: '{app_name}' is still installed after all remote attempts."
+                    host_status.log_output = f"Verification Failed: '{app_name}' is still installed after all attempts."
                 else:
                     host_status.status = "SUCCESS"
                     host_status.progress_percent = 100
-                    host_status.log_output = f"Successfully verified uninstallation of {app_name} (v{matched_app['version']})."
-                # ==========================================================
+                    
+                    if success_method == "Primary Registry String":
+                        final_time = primary_elapsed
+                    elif success_method == "WMI Fallback":
+                        final_time = primary_elapsed + wmi_elapsed
+                    else:
+                        final_time = primary_elapsed + wmi_elapsed + pkg_elapsed
+                        
+                    host_status.log_output = f"Successfully verified uninstallation of {app_name} (v{matched_app['version']}) via {success_method} in {final_time:.1f}s."
 
             db.session.commit()
             return {"status": host_status.status, "host": target_host}
