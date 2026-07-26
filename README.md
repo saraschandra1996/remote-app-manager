@@ -2,14 +2,15 @@
 
 Prerequisites: A fresh Ubuntu 22.04 or 24.04 server with root or sudo access and an active internet connection.
 
-Step 1: System Update & Basic Tools
+**Step 1:** System Update & Basic Tools
 First, ensure the server's package index is up to date and install Git.
 
 Bash
 sudo apt-get update
 sudo apt-get upgrade -y
 sudo apt-get install -y git curl
-Step 2: Install Docker & Docker Compose
+
+**Step 2:** Install Docker & Docker Compose
 Install the official Docker engine and the Compose plugin.
 
 Bash
@@ -30,13 +31,15 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 # Enable Docker to start on boot
 sudo systemctl enable docker
 sudo systemctl start docker
-Step 3: Clone the Repository
+
+**Step 3:** Clone the Repository
 Pull your code onto the new server.
 
 Bash
 git clone <YOUR_GIT_REPOSITORY_URL>
 cd remote-app-manager
-Step 4: Create Volume Directories & Set Permissions
+
+**Step 4:** Create Volume Directories & Set Permissions
 Because Docker containers run as root by default, we must create the persistent directories on the host machine manually and open their permissions. This prevents the SQLite "write-protected" database crash and ensures file uploads work immediately.
 
 Bash
@@ -47,12 +50,14 @@ mkdir -p uploads
 # Grant full read/write/execute permissions to prevent container lockouts
 sudo chmod -R 777 data/
 sudo chmod -R 777 uploads/
-Step 5: Build and Launch the Application
+
+**Step 5:** Build and Launch the Application
 Use Docker Compose to build the images and spin up the Redis, Backend, Celery Worker, and Frontend containers in detached mode.
 
 Bash
 docker compose up -d --build
-Step 6: Verify Deployment
+
+**Step 6:** Verify Deployment
 Check the status of your containers to ensure they are healthy and running.
 
 Bash
