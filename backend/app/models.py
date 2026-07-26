@@ -10,6 +10,7 @@ class Job(db.Model):
     app_name = db.Column(db.String(255), nullable=True)
     uninstall_key = db.Column(db.Text, nullable=True)
     installer_path = db.Column(db.Text, nullable=True)
+    admin_username = db.Column(db.String(255), nullable=True) # NEW COLUMN
     status = db.Column(db.String(20), default="PENDING") # PENDING, RUNNING, CANCELLED, COMPLETED, FAILED
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)

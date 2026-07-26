@@ -19,6 +19,9 @@ export const cancelJob = (jobId) =>
 export const cancelHostTask = (jobId, hostId) => 
   axios.post(`${API_BASE}/jobs/${jobId}/hosts/${hostId}/cancel`);
 
+export const getAllJobs = () => 
+  axios.get(`${API_BASE}/jobs`);
+
 // --- NEW FILE UPLOAD ENDPOINTS ---
 
 export const uploadFile = (file, onUploadProgress) => {

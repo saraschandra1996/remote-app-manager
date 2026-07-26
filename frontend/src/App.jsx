@@ -1,3 +1,4 @@
+import JobHistory from './components/JobHistory';
 import React, { useState, useEffect } from 'react';
 import Navbar from './components/Navbar';
 import HostForm from './components/HostForm';
@@ -155,9 +156,7 @@ export default function App() {
             />
           </div>
         ) : (
-          <div className="bg-slate-800 rounded-xl border border-slate-700 p-6 text-center text-slate-400">
-            Job History Audit Logs view will display past execution logs stored in SQLite.
-          </div>
+	  <JobHistory />
         )}
       </main>
 

@@ -79,6 +79,7 @@ def create_job():
         app_name=app_name,
         uninstall_key=uninstall_key,
         installer_path=installer_path,
+	admin_username=username,
         status="PENDING"
     )
     db.session.add(job)
@@ -136,6 +137,39 @@ def get_job_status(job_id):
             for h in hosts
         ]
     })
+
+# ---------------------------------------------------------------------------
+# Get All Jobs History Endpoint (UPDATED)
+# ---------------------------------------------------------------------------
+@app.route("/jobs", methods=["GET"])
+@app.route("/api/jobs", methods=["GET"])
+def get_all_jobs():
+    try:
+        jobs = Job.query.order_by(Job.created_at.desc()).all()
+        result = []
+        for job in jobs:
+            hosts = HostStatus.query.filter_by(job_id=job.id).all()
+            result.append({
+                "job_id": job.id,
+                "action": job.action,
+                "domain": job.domain,
+                "app_name": job.app_name,
+                "admin_username": job.admin_username,
+                "status": job.status,
+                "created_at": job.created_at.isoformat(),
+                "hosts": [
+                    {
+                        "hostname": h.hostname,
+                        "fqdn": h.fqdn,
+                        "status": h.status,
+                        "log_output": h.log_output
+                    }
+                    for h in hosts
+                ]
+            })
+        return jsonify({"jobs": result}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch job history: {str(e)}"}), 500
 
 # ---------------------------------------------------------------------------
 # Individual Host Cancellation Endpoint
