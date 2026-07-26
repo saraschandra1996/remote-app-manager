@@ -23,10 +23,11 @@ sudo apt-get install -y git curl
 ```
 ---
 
-#### Step 2: Install Docker & Docker Compose
+### Step 2: Install Docker & Docker Compose
 Install the official Docker engine and the Compose plugin directly from Docker's repositories.
 
 # Add Docker's official GPG key and repository
+```bash
 sudo install -m 0755 -d /etc/apt/keyrings
 sudo curl -fsSL [https://download.docker.com/linux/ubuntu/gpg](https://download.docker.com/linux/ubuntu/gpg) -o /etc/apt/keyrings/docker.asc
 sudo chmod a+r /etc/apt/keyrings/docker.asc
@@ -43,3 +44,39 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 # Enable Docker to start on boot
 sudo systemctl enable docker
 sudo systemctl start docker
+```
+### Step 3: Clone the Repository
+Pull the application code onto your new server. (Replace the URL with your actual Git repository URL).
+
+```bash
+git clone <YOUR_GIT_REPOSITORY_URL>
+cd remote-app-manager
+```
+
+### Step 4: Create Volume Directories & Set Permissions
+Because Docker containers run as root by default, you must create the persistent directories on the host machine manually and open their permissions. This ensures the SQLite database and installer uploads are not locked out or overwritten during rebuilds.
+
+```bash
+# Create the required persistent directories
+mkdir -p data
+mkdir -p uploads
+
+# Grant full read/write/execute permissions 
+sudo chmod -R 777 data/
+sudo chmod -R 777 uploads/
+```
+
+### Step 5: Build and Launch the Application
+Use Docker Compose to build the images and spin up the Redis, Backend, Celery Worker, and Frontend containers in detached mode.
+
+```bash
+docker compose up -d --build
+```
+
+### Step 6: Verify Deployment
+Check the status of your containers to ensure they are properly initialized and healthy.
+
+```bash
+docker compose ps
+```
+Once all containers show as Started or Healthy, open a web browser and navigate to the new server's IP address (e.g., http://<SERVER_IP>). The application will be live and ready for your first deployment task.
