@@ -2,7 +2,7 @@
 
 Remote App Manager is a robust, Dockerized web application built with React, Flask, and Celery. It allows administrators to perform parallel, remote installations and uninstallations of `.exe` and `.msi` applications across multiple Windows hosts using WinRM. It features real-time progress tracking, job cancellation, CSV auditing, and automated registry discovery.
 
-## 🚀 Deployment Guide (Fresh Server)
+## Deployment Guide 
 
 These instructions will guide you through deploying this application on a brand-new Linux (Ubuntu/Debian) server.
 
