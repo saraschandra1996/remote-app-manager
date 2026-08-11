@@ -29,11 +29,11 @@ Install the official Docker engine and the Compose plugin directly from Docker's
 # Add Docker's official GPG key and repository
 ```bash
 sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL [https://download.docker.com/linux/ubuntu/gpg](https://download.docker.com/linux/ubuntu/gpg) -o /etc/apt/keyrings/docker.asc
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 sudo chmod a+r /etc/apt/keyrings/docker.asc
 
 echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] [https://download.docker.com/linux/ubuntu](https://download.docker.com/linux/ubuntu) \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
@@ -64,6 +64,10 @@ mkdir -p uploads
 # Grant full read/write/execute permissions 
 sudo chmod -R 777 data/
 sudo chmod -R 777 uploads/
+```
+#### Tip: To avoid typing sudo every time you run Docker commands, add your user to the docker group
+```bash
+sudo usermod -aG docker $USER
 ```
 
 ### Step 5: Build and Launch the Application
