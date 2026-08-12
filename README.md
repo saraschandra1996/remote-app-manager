@@ -49,7 +49,7 @@ sudo systemctl start docker
 Pull the application code onto your new server. (Replace the URL with your actual Git repository URL).
 
 ```bash
-git clone <YOUR_GIT_REPOSITORY_URL>
+git clone https://github.com/saraschandra1996/remote-app-manager.git
 cd remote-app-manager
 ```
 
